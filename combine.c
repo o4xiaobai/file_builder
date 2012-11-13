@@ -26,6 +26,11 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+enum {
+    E_FOPEN = 1,
+    E_ALLOC,
+	E_EMPTY_TARGET,
+};
 #define BUFF_SIZE (64<<10)
 
 #define SIZE_SEGMENT_NAME 16
@@ -40,30 +45,48 @@ struct segment {
 	int valid;
 };
 
+struct target {
+	struct target  *prev;
+	struct target  *next;
+	struct segment *seg_head;
+	char   name[SIZE_SEGMENT_NAME];
+	char   filename[SIZE_FILENAME];
+	int    size;
+};
+
 #define SEG_STAT_VALID   1
 #define SEG_STAT_INVALID 0
 
-#define SEG_BEGIN    "seg_begin"
-#define SEG_NAME     "seg_name="
-#define SEG_OFFSET   "seg_offset="
-#define SEG_FILENAME "seg_filename="
-#define SEG_SIZE     "seg_size="
-#define SEG_VALID    "seg_valid="
-#define SEG_END      "seg_end"
-#define SEG_LENGTH_X(seg) (strlen(seg))
+#define TARGET_BEGIN    "target_begin"
+#define TARGET_NAME     "target_name="
+#define TARGET_SIZE     "target_size="
+#define TARGET_FILENAME "target_filename="
 
-static struct segment *seg_head;
+#define SEG_BEGIN       "seg_begin"
+#define SEG_NAME        "seg_name="
+#define SEG_OFFSET      "seg_offset="
+#define SEG_FILENAME    "seg_filename="
+#define SEG_SIZE        "seg_size="
+#define SEG_VALID       "seg_valid="
+#define SEG_END         "seg_end"
+
+#define TARGET_END      "target_end"
+
+#define STRLEN(seg) (strlen(seg))
+
+static struct target *g_target_head = NULL;
+static int g_verbose = 0;
 
 static int print_segment(struct segment *segment)
 {
 	if (segment) {
-		printf("%s\n",     SEG_BEGIN);
-		printf("%s%s\n",   SEG_NAME,     segment->name);
-		printf("%s0x%x\n", SEG_OFFSET,   segment->offset);
-		printf("%s%s\n",   SEG_FILENAME, segment->filename);
-		printf("%s0x%x\n", SEG_SIZE,     segment->size);
-		printf("%s%d\n",   SEG_VALID,   segment->valid);
-		printf("%s\n",     SEG_END);
+		printf("  %s\n",     SEG_BEGIN);
+		printf("    %s%s\n",   SEG_NAME,     segment->name);
+		printf("    %s0x%x\n", SEG_OFFSET,   segment->offset);
+		printf("    %s%s\n",   SEG_FILENAME, segment->filename);
+		printf("    %s0x%x\n", SEG_SIZE,     segment->size);
+		printf("    %s%d\n",   SEG_VALID,    segment->valid);
+		printf("  %s\n",     SEG_END);
 	}
 	return 0;
 }
@@ -72,8 +95,23 @@ static int print_segment_list(struct segment *head)
 {
 	while (head) {
 		print_segment(head);
-		printf("\n");
+	//	printf("\n");
 		head = head->next;
+	}
+	return 0;
+}
+
+static int print_target(struct target *target)
+{
+	if (target) {
+		printf("%s\n",     TARGET_BEGIN);
+		printf("  %s%s\n",   TARGET_NAME,     target->name);
+		printf("  %s0x%x\n", TARGET_SIZE,     target->size);
+		printf("  %s%s\n",   TARGET_FILENAME, target->filename);
+		if (target->seg_head) {
+			print_segment_list(target->seg_head);
+		}
+		printf("%s\n",     TARGET_END);
 	}
 	return 0;
 }
@@ -92,17 +130,47 @@ static int free_segmnet_list(struct segment *head)
 	return 0;
 }
 
-static int add_segment(struct segment *segment)
+static int free_target(struct target *target)
+{
+	if (NULL == target) {
+		return 0;
+	}
+	if (target->seg_head) {
+		free_segmnet_list(target->seg_head);
+		target->seg_head = NULL;
+	}
+	memset(target, 0, sizeof(struct target));
+	free(target);
+	return 0;
+}
+
+static int add_target(struct target *target)
+{
+	if (NULL == g_target_head) {
+		g_target_head = target;
+	} else {
+		target->next = g_target_head;
+		g_target_head->prev = target;
+		g_target_head = target;
+	}
+	return 0;
+}
+
+static int add_segment_to_target(struct target *target, struct segment *segment)
 {
 	struct segment *prev, *next;
 	int retvalue = 0;
 
-	if (NULL == seg_head) {
-		seg_head = segment;
+	if (NULL == target) {
+		printf("%s: empty target\n", __func__);
+		return -E_EMPTY_TARGET;
+	}
+	if (NULL == target->seg_head) {
+		target->seg_head = segment;
 		return retvalue;
 	}
 
-	prev = next = seg_head;
+	prev = next = target->seg_head;
 
 	while(next) {
 		if (next->offset <= segment->offset) {
@@ -119,8 +187,8 @@ static int add_segment(struct segment *segment)
 	} else {
 		next->prev = segment;
 		segment->next = next;
-		if (prev == seg_head) {
-			seg_head = segment;
+		if (prev == target->seg_head) {
+			target->seg_head = segment;
 		}
 		if (prev != next) {
 			prev->next = segment;
@@ -132,30 +200,110 @@ static int add_segment(struct segment *segment)
 
 static int parse_config(FILE *f_config)
 {
-	char buff[1024];
+	char buffer[1024];
+	char *buff;
 	int line_no = 0;
+	int target_config;
 	int seg_config;
 	struct segment *new_seg = NULL;
+	struct target *new_target = NULL;
 	int retvalue = 0;
 	int line_length;
 
-	line_no = 0;
-	seg_config = 0;
-	while(fgets(buff, sizeof(buff), f_config)) {
+	line_no       = 0;
+	seg_config    = 0;
+	target_config = 0;
+	buff = buffer;
+
+	while(fgets(buffer, sizeof(buffer), f_config)) {
+		buff = buffer;
+
 		++line_no;
-		line_length = strlen(buff)- 1;
-		while (buff[line_length] == '\n' || buff[line_length] == '\r')  {
-			buff[line_length] = '\0';
-			line_length--;
-		}
+		/* ignore comment line */
 		if ('#' == buff[0]) {
 			continue;
 		}
-		if(0 == strncasecmp(buff, SEG_BEGIN, SEG_LENGTH_X(SEG_BEGIN))) {
+
+		/* ignore '\r' '\n' ' ' '\t' and the start of line */
+		while ('\r' == *buff || '\n' == *buff || '\t' == *buff || ' ' == *buff) {
+			buff++;
+		}
+
+		/* ignore '\r' '\n' ' ' '\t' and the end of line */
+		line_length = strlen(buff)- 1;
+		while (buff[line_length] == '\n' || buff[line_length] == '\r' || buff[line_length] == ' ' 
+				|| buff[line_length] == '\t')  {
+			buff[line_length] = '\0';
+			line_length--;
+		}
+
+		if (line_length < 0) {
+			continue;
+		}
+
+		if(0 == strncasecmp(buff, TARGET_BEGIN, STRLEN(TARGET_BEGIN))) {
+			if (target_config) {
+				printf("target config finish mark missing at line %d\n", line_no);
+				/*  */
+				if (seg_config) {
+					seg_config = 0;
+					retvalue = add_segment_to_target(new_target, new_seg);
+					new_seg = NULL;
+				}
+				retvalue = add_target(new_target);
+				new_target = NULL;
+			}
+
+			target_config = 1;
+			new_target = (struct target *)malloc(sizeof(struct target));
+			if (NULL == new_target) {
+				printf("alloc buffer for new target faild\n");
+				retvalue = -ENOMEM;
+				break;
+			}
+			memset(new_target, 0, sizeof(struct target));
+			continue;
+		} 
+		
+		if(0 == strncasecmp(buff, TARGET_END, STRLEN(TARGET_END))) {
+			if (target_config) {
+				/*  */
+				if (seg_config) {
+					retvalue = add_segment_to_target(new_target, new_seg);
+					new_seg = NULL;
+					seg_config = 0;
+				}
+				retvalue = add_target(new_target);
+				new_target = NULL;
+				target_config = 0;
+			}
+			continue;
+		} 
+
+		if (!target_config) {
+			printf("config out of target range at line %d\n", line_no);
+			continue;
+		}
+		
+		if(0 == strncasecmp(buff, TARGET_NAME, STRLEN(TARGET_NAME))) {
+			snprintf(new_target->name, SIZE_SEGMENT_NAME, "%s", buff+STRLEN(TARGET_NAME));
+			continue;
+		} 
+		
+		if(0 == strncasecmp(buff, TARGET_FILENAME, STRLEN(TARGET_FILENAME))) {
+			snprintf(new_target->filename, SIZE_FILENAME, "%s", buff+STRLEN(TARGET_FILENAME));
+			continue;
+		} 
+		
+		if(0 == strncasecmp(buff, TARGET_SIZE, STRLEN(TARGET_SIZE))) {
+			new_target->size = strtoul(buff+STRLEN(TARGET_SIZE), NULL, 0);
+			continue;
+		} 
+		
+		if(0 == strncasecmp(buff, SEG_BEGIN, STRLEN(SEG_BEGIN))) {
 			if (seg_config) {
-				printf("segment config finish mark missing line %d\n", line_no);
-				seg_config = 0;
-				retvalue = add_segment(new_seg);
+				printf("segment config finish mark missing at line %d\n", line_no);
+				retvalue = add_segment_to_target(new_target, new_seg);
 				new_seg = NULL;
 			}
 			seg_config = 1;
@@ -166,50 +314,57 @@ static int parse_config(FILE *f_config)
 				break;
 			}
 			memset(new_seg, 0, sizeof(struct segment));
-		} else if(0 == strncasecmp(buff, SEG_END, SEG_LENGTH_X(SEG_END))) {
-			seg_config = 0;
-			retvalue = add_segment(new_seg);
-			new_seg = NULL;
-		} else if(0 == strncasecmp(buff, SEG_NAME, SEG_LENGTH_X(SEG_NAME))) {
-			if (!seg_config) {
-				printf("config out of segment range at line %d\n", line_no);
-				continue;
+			continue;
+		} 
+		
+		if(0 == strncasecmp(buff, SEG_END, STRLEN(SEG_END))) {
+			if(seg_config) {
+				retvalue = add_segment_to_target(new_target, new_seg);
+				new_seg = NULL;
+				seg_config = 0;
 			}
-			snprintf(new_seg->name, SIZE_SEGMENT_NAME, "%s", buff+SEG_LENGTH_X(SEG_NAME));
-		} else if(0 == strncasecmp(buff, SEG_OFFSET, SEG_LENGTH_X(SEG_OFFSET))) {
-			if (!seg_config) {
-				printf("config out of segment range at line %d\n", line_no);
-				continue;
-			}
-			new_seg->offset = strtoul(buff+SEG_LENGTH_X(SEG_OFFSET), NULL, 0);
-		} else if(0 == strncasecmp(buff, SEG_FILENAME, SEG_LENGTH_X(SEG_FILENAME))) {
-			if (!seg_config) {
-				printf("config out of segment range at line %d\n", line_no);
-				continue;
-			}
-			snprintf(new_seg->filename, SIZE_FILENAME, "%s", buff+SEG_LENGTH_X(SEG_FILENAME));
-		} else {
-			if(line_length >= 0) {
-				printf("invalid config at line %d\n", line_no);
-			}
+			continue;
+		} 
+		
+		if (!seg_config) {
+			printf("config out of segment range at line %d\n", line_no);
+			continue;
 		}
+
+		if(0 == strncasecmp(buff, SEG_NAME, STRLEN(SEG_NAME))) {
+			snprintf(new_seg->name, SIZE_SEGMENT_NAME, "%s", buff+STRLEN(SEG_NAME));
+			continue;
+		} 
+		
+		if(0 == strncasecmp(buff, SEG_OFFSET, STRLEN(SEG_OFFSET))) {
+			new_seg->offset = strtoul(buff+STRLEN(SEG_OFFSET), NULL, 0);
+			continue;
+		} 
+		
+		if(0 == strncasecmp(buff, SEG_FILENAME, STRLEN(SEG_FILENAME))) {
+			snprintf(new_seg->filename, SIZE_FILENAME, "%s", buff+STRLEN(SEG_FILENAME));
+			continue;
+		} 
+
+		printf("invalid config at line %d\n", line_no);
 	}
 
 	if (seg_config) {
 		printf("segment config finish mark missing at the end of file\n");
 		seg_config = 0;
-		retvalue = add_segment(new_seg);
+		retvalue = add_segment_to_target(new_target, new_seg);
 		new_seg = NULL;
+	}
+
+	if (target_config) {
+		printf("target config finish mark missing at the end of file\n");
+		target_config = 0;
+		retvalue = add_target(new_target);
+		new_target = NULL;
 	}
 
 	return retvalue;
 }
-
-
-enum {
-    E_FOPEN = 1,
-    E_ALLOC,
-};
 
 static int get_file_size(char *filename, int *size)
 {
@@ -220,7 +375,7 @@ static int get_file_size(char *filename, int *size)
 
     if(stat(filename, &fstat)) {
         perror("stat");
-        printf("get size of file \"%s\" failed.\"\n", filename);
+        printf("get size of file \"%s\" failed.\n", filename);
         return -1;
     } else {
         *size = fstat.st_size;
@@ -373,35 +528,66 @@ static int output_segment_list(FILE *f_out, struct segment *head)
 	return last_offset;
 }
 
-static int usage(char *name)
+static int build_target(struct target *target)
 {
-	printf("Usage:\n");
-	printf("\t%s <config_file> <total_size>\n", name);
-	return 0;
-}
-
-int main(int argc, char ** argv)
-{
-	FILE *f_in = NULL;
 	FILE *f_out = NULL;
-	int total_size;
 	int last_offset;
 
-	if (argc != 3) {
-		return (usage(argv[0]));
+	if (NULL == target) {
+		printf("%s: empty target\n", __func__);
+		return -E_EMPTY_TARGET;
 	}
 
-	total_size = strtoul(argv[2], NULL, 0);
-	seg_head = NULL;
+	/* parameter check to be added here */
 
-	f_in = fopen(argv[1], "r");
-	if (NULL == f_in) {
+	/*  */
+
+	check_segment_list(target->seg_head);
+	if (g_verbose) {
+		print_target(target);
+	}
+
+	f_out = fopen(target->filename, "wb+");
+	if (NULL == f_out) {
 		perror("open file error");
 		return -errno;
 	}
 
-	f_out = fopen("hellowold.bin", "wb+");
-	if (NULL == f_out) {
+	last_offset = output_segment_list(f_out, target->seg_head);
+	if (target->size > last_offset) {
+		append_byte_to_file(f_out, 0xff, target->size - last_offset);
+	} else if (target->size < last_offset) {
+		printf("Warning: target file size is big than expected!\n");
+	}
+	fclose(f_out);
+
+	return 0;
+}
+
+static int usage(char *name)
+{
+	printf("Usage:\n");
+	printf("\t%s [-v] <config_file> \n", name);
+	return 0;
+}
+
+int main(int argc, char **argv)
+{
+	FILE *f_in = NULL;
+	struct target *target_head;
+
+	if (argc != 2 && argc != 3) {
+		return (usage(argv[0]));
+	}
+
+	if (argc == 3) {
+		if (strcmp(argv[1], "-v") == 0) {
+			g_verbose = 1;
+		}
+	}
+
+	f_in = fopen(argv[argc - 1], "r");
+	if (NULL == f_in) {
 		perror("open file error");
 		return -errno;
 	}
@@ -409,16 +595,12 @@ int main(int argc, char ** argv)
 	parse_config(f_in);
 	fclose(f_in);
 
-	check_segment_list(seg_head);
-	print_segment_list(seg_head);
-
-	last_offset = output_segment_list(f_out, seg_head);
-	if (total_size > last_offset) {
-		append_byte_to_file(f_out, 0xff, total_size - last_offset);
+	while(g_target_head) {
+		target_head = g_target_head;
+		g_target_head = target_head->next;
+		build_target(target_head);
+		free_target(target_head);
 	}
-	fclose(f_out);
-
-	free_segmnet_list(seg_head);
 
 	return 0;
 
