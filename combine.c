@@ -52,6 +52,7 @@ struct target {
 	char   name[SIZE_SEGMENT_NAME];
 	char   filename[SIZE_FILENAME];
 	int    size;
+	int    build;
 };
 
 #define SEG_STAT_VALID   1
@@ -61,6 +62,7 @@ struct target {
 #define TARGET_NAME     "target_name="
 #define TARGET_SIZE     "target_size="
 #define TARGET_FILENAME "target_filename="
+#define TARGET_BUILD    "target_build="
 
 #define SEG_BEGIN       "seg_begin"
 #define SEG_NAME        "seg_name="
@@ -80,13 +82,13 @@ static int g_verbose = 0;
 static int print_segment(struct segment *segment)
 {
 	if (segment) {
-		printf("  %s\n",     SEG_BEGIN);
+		printf("  %s\n",       SEG_BEGIN);
 		printf("    %s%s\n",   SEG_NAME,     segment->name);
 		printf("    %s0x%x\n", SEG_OFFSET,   segment->offset);
 		printf("    %s%s\n",   SEG_FILENAME, segment->filename);
-		printf("    %s0x%x\n", SEG_SIZE,     segment->size);
-		printf("    %s%d\n",   SEG_VALID,    segment->valid);
-		printf("  %s\n",     SEG_END);
+		printf("#   %s0x%x\n", SEG_SIZE,     segment->size);
+		printf("#   %s%d\n",   SEG_VALID,    segment->valid);
+		printf("  %s\n",       SEG_END);
 	}
 	return 0;
 }
@@ -108,6 +110,7 @@ static int print_target(struct target *target)
 		printf("  %s%s\n",   TARGET_NAME,     target->name);
 		printf("  %s0x%x\n", TARGET_SIZE,     target->size);
 		printf("  %s%s\n",   TARGET_FILENAME, target->filename);
+		printf("  %s%d\n",   TARGET_BUILD,    target->build);
 		if (target->seg_head) {
 			print_segment_list(target->seg_head);
 		}
@@ -295,6 +298,11 @@ static int parse_config(FILE *f_config)
 			continue;
 		} 
 		
+		if(0 == strncasecmp(buff, TARGET_BUILD, STRLEN(TARGET_BUILD))) {
+			new_target->build = strtoul(buff+STRLEN(TARGET_BUILD), NULL, 0);
+			continue;
+		} 
+
 		if(0 == strncasecmp(buff, TARGET_SIZE, STRLEN(TARGET_SIZE))) {
 			new_target->size = strtoul(buff+STRLEN(TARGET_SIZE), NULL, 0);
 			continue;
@@ -547,19 +555,21 @@ static int build_target(struct target *target)
 		print_target(target);
 	}
 
-	f_out = fopen(target->filename, "wb+");
-	if (NULL == f_out) {
-		perror("open file error");
-		return -errno;
-	}
+	if (target->build) {
+		f_out = fopen(target->filename, "wb+");
+		if (NULL == f_out) {
+			perror("open file error");
+			return -errno;
+		}
 
-	last_offset = output_segment_list(f_out, target->seg_head);
-	if (target->size > last_offset) {
-		append_byte_to_file(f_out, 0xff, target->size - last_offset);
-	} else if (target->size < last_offset) {
-		printf("Warning: target file size is big than expected!\n");
-	}
-	fclose(f_out);
+		last_offset = output_segment_list(f_out, target->seg_head);
+		if (target->size > last_offset) {
+			append_byte_to_file(f_out, 0xff, target->size - last_offset);
+		} else if (target->size < last_offset) {
+			printf("Warning: target file size is big than expected!\n");
+		}
+		fclose(f_out);
+	}  
 
 	return 0;
 }
