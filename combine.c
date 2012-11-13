@@ -334,7 +334,7 @@ static int check_segment_list(struct segment *head)
 				continue;
 			}
 
-			if ((head->offset+head->size)>=(segment->offset)) {
+			if ((head->offset+head->size)>(segment->offset)) {
 				printf("invalid segmnet %s\n", segment->name);
 				segment->valid = SEG_STAT_INVALID;
 			}
@@ -342,6 +342,35 @@ static int check_segment_list(struct segment *head)
 	}
 
 	return 0;
+}
+
+//static int append_file1_to_file2(FILE *f_out, char *filename)
+//
+static int append_segment_to_file(FILE *f_out, struct segment *segment)
+{
+	if (segment && (SEG_STAT_VALID == segment->valid)) {
+		return append_file1_to_file2(f_out, segment->filename);
+	}
+	return -1;
+}
+
+static int output_segment_list(FILE *f_out, struct segment *head)
+{
+	int last_offset = 0;
+
+	for (last_offset = 0; head; head = head->next) {
+		if (SEG_STAT_VALID != head->valid) {
+			continue;
+		}
+		if (head->offset > last_offset) {
+			append_byte_to_file(f_out, 0xff, head->offset - last_offset);
+			last_offset = head->offset;
+		}
+		append_segment_to_file(f_out, head);
+		last_offset = head->offset + head->size;
+	}
+
+	return last_offset;
 }
 
 static int usage(char *name)
@@ -354,7 +383,9 @@ static int usage(char *name)
 int main(int argc, char ** argv)
 {
 	FILE *f_in = NULL;
+	FILE *f_out = NULL;
 	int total_size;
+	int last_offset;
 
 	if (argc != 3) {
 		return (usage(argv[0]));
@@ -369,12 +400,24 @@ int main(int argc, char ** argv)
 		return -errno;
 	}
 
+	f_out = fopen("hellowold.bin", "wb+");
+	if (NULL == f_out) {
+		perror("open file error");
+		return -errno;
+	}
+
 	parse_config(f_in);
 	fclose(f_in);
 
-//	print_segment_list(seg_head);
 	check_segment_list(seg_head);
 	print_segment_list(seg_head);
+
+	last_offset = output_segment_list(f_out, seg_head);
+	if (total_size > last_offset) {
+		append_byte_to_file(f_out, 0xff, total_size - last_offset);
+	}
+	fclose(f_out);
+
 	free_segmnet_list(seg_head);
 
 	return 0;
